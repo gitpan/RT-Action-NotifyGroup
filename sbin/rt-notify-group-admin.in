@@ -1,0 +1,400 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+rt-notify-group-admin - Command line tool for administrating NotifyGroup actions
+
+=head1 SYNOPSIS
+
+	# get list of actions that allready exist
+	rt-notify-group-admin --list
+
+	# create notify group Foo action
+	rt-notify-group-admin --create 'Notify foo team' --group Foo
+
+	# create action that notify with comment
+	rt-notify-group-admin --create 'Notify foo team as comment' --comment --group Foo
+
+	# create action that notify users from groups Foo and Bar
+	rt-notify-group-admin --create 'Notify group Foo and Bar' --group Foo --group Bar
+
+	# create scrip action and user to it
+	rt-notify-group-admin --create 'Notify user foo@bar.com' --user foo@bar.com
+
+	# Add user or group to existant scrip action
+	rt-notify-group-admin --create 'Notify VIPs' --user vip1@bar.com
+	rt-notify-group-admin --add 'Notify VIPs' --user vip2@bar.com --group vip1 --user vip3@foo.com
+
+	# rename action
+	rt-notify-group-admin --rename 'Notify VIPs' --newname 'Inform VIPs'
+
+	# switch from correspond to comment and back
+	rt-notify-group-admin --switch 'Notify VIPs'
+ 
+	# delete scrip action
+	rt-notify-group-admin --delete 'Notify user foo@bar.com'
+
+=head1 DESCRIPTION
+
+rt-notify-group-admin 
+
+=cut
+
+use strict;
+use lib qw(@RT_LIB_PATH@);
+
+use RT;
+RT::LoadConfig;
+RT::Init;
+
+require RT::ScripActions;
+
+require Storable;
+
+use Getopt::Long qw(GetOptions);
+
+our $cmd = 'usage';
+our $opts = {};
+
+sub parse_args
+{
+	my $tmp;
+	Getopt::Long::Configure( "pass_through" );
+	if( GetOptions( 'list' => \$tmp ) && $tmp ) {
+		$cmd = 'list';
+	} elsif( GetOptions( 'create=s' => \$tmp ) && $tmp ) {
+		$cmd = 'create';
+		$opts->{'name'} = $tmp;
+		$opts->{'groups'} = [];
+		$opts->{'users'} = [];
+		GetOptions( 'comment' => \$opts->{'comment'} );
+		GetOptions( 'group:s@' => $opts->{'groups'} );
+		GetOptions( 'user:s@' => $opts->{'users'} );
+		unless( @{ $opts->{'users'} } + @{ $opts->{'groups'} } ) {
+			usage();
+			exit(-1);
+		}
+	} elsif( GetOptions( 'add=s' => \$tmp ) && $tmp ) {
+		$cmd = 'add';
+		$opts->{'name'} = $tmp;
+		$opts->{'groups'} = [];
+		$opts->{'users'} = [];
+		GetOptions( 'group:s@' => $opts->{'groups'} );
+		GetOptions( 'user:s@' => $opts->{'users'} );
+		unless( @{ $opts->{'users'} } + @{ $opts->{'groups'} } ) {
+			usage();
+			exit(-1);
+		}
+	} elsif( GetOptions( 'switch=s' => \$tmp ) && $tmp ) {
+		$cmd = 'switch';
+		$opts->{'name'} = $tmp;
+	} elsif( GetOptions( 'rename=s' => \$tmp ) && $tmp ) {
+		$cmd = 'rename';
+		$opts->{'name'} = $tmp;
+		GetOptions( 'newname=s' => \$opts->{'newname'} );
+		unless( $opts->{'newname'} ) {
+			usage();
+			exit(-1);
+		}
+	} elsif( GetOptions( 'delete=s' => \$tmp ) && $tmp) {
+		$cmd = 'delete';
+		$opts->{'name'} = $tmp;
+	} else {
+		$cmd = 'usage';
+	}
+	
+	return;
+}
+
+sub usage
+{
+	print "usage $0: xxxx\n";
+}
+
+parse_args();
+
+{
+	eval "main::$cmd()";
+	if( $@ ) {
+		print STDERR $@ ."\n";
+	}
+}
+
+exit(0);
+
+
+=head1 USAGE
+
+=head2 list
+
+=cut
+
+sub list
+{
+	my $actions = RT::ScripActions->new( $RT::SystemUser );
+	$actions->Limit( FIELD => 'ExecModule',
+			 VALUE => 'NotifyGroup',
+			 ENTRYAGGREGATOR => 'OR');
+	$actions->Limit( FIELD => 'ExecModule',
+			 VALUE => 'NotifyGroupAsComment',
+			 ENTRYAGGREGATOR => 'OR');
+	while( my $a = $actions->Next ) {
+		_list( $a );
+	}
+
+	return;
+}
+
+sub _list
+{
+	my $action = shift;
+
+	print "Name: ". $action->Name() ."\n";
+	print "Module: ". $action->ExecModule() ."\n";
+
+	my @args = eval { @{ Storable::thaw( $action->Argument ) } };
+	if( $@ ) {
+		$RT::Logger->error( "Storable couldn't thaw argument: $@" );
+		return;
+	}
+
+	print "Members: \n";
+	foreach( @args ) {
+		print "\t". $_->{'Type'} ."\t=> ". $_->{'Instance'} ."\n";
+	}
+	print "\n";
+	return;
+}
+
+=head2 create
+
+=cut
+
+sub create
+{
+	my $actions = RT::ScripActions->new( $RT::SystemUser );
+	$actions->Limit( FIELD => 'Name',
+			 VALUE => $opts->{'name'} );
+
+	if( $actions->Count ) {
+		print STDERR "ScripAction '". $opts->{'name'} ."' allready exists\n";
+		exit(-1);
+	}
+	my @groups = _check_groups( @{ $opts->{'groups'} } );
+	my @users = _check_users( @{ $opts->{'users'} } );
+	
+	unless( @users + @groups ) {
+		print STDERR "List of groups and users is empty\n";
+		exit(-1);
+	}
+
+	my $action = __create_empty( $opts->{'name'}, $opts->{'comment'} );
+
+	_add_user( $action, $_ ) foreach( @users );
+	_add_group( $action, $_ ) foreach( @groups );
+
+	return;
+}
+
+sub __create_empty
+{
+	my $name = shift;
+	my $as_comment = shift || 0;
+	require RT::ScripAction;
+	my $action = RT::ScripAction->new( $RT::SystemUser );
+	$action->Create(
+			Name => $name,
+			Description => "Created with rt-notify-group-admin script",
+			ExecModule => $as_comment? 'NotifyGroupAsComment': 'NotifyGroup',
+			Argument => Storable::freeze( [] ),
+			);
+
+	return $action;
+}
+
+sub _check_groups
+{
+	return grep{ __check_group($_) ? 1 :
+			do { print STDERR "Group '$_' skipped, doesn't exist\n"; 0; }
+		} @_;
+}
+
+sub __check_group
+{
+	my $instance = shift;
+	require RT::Group;
+	my $obj = RT::Group->new( $RT::SystemUser );
+	$obj->LoadUserDefinedGroup( $instance );
+	return $obj->id ? 1 : 0;
+}
+
+sub _check_users
+{
+	return grep{ __check_user($_) ? 1 :
+			do { print STDERR "Group '$_' skipped, doesn't exist\n"; 0; }
+		} @_;
+}
+
+sub __check_user
+{
+	my $instance = shift;
+	require RT::User;
+	my $obj = RT::User->new( $RT::SystemUser );
+	$obj->Load( $instance );
+	return $obj->id ? 1 : 0;
+}
+
+=head2 add
+
+
+
+=cut
+
+sub add
+{
+	my $action = _get_action_by_name( $opts->{'name'} );
+
+	unless( $action ) {
+		print STDERR "ScripAction '". $opts->{'name'} ."' doesn't exist\n";
+		exit(-1);
+	}
+
+	my @groups = _check_groups( @{ $opts->{'groups'} } );
+	my @users = _check_users( @{ $opts->{'users'} } );
+	
+	unless( @users + @groups ) {
+		print STDERR "List of groups and users is empty\n";
+		exit(-1);
+	}
+
+	_add_user( $action, $_ ) foreach( @users );
+	_add_group( $action, $_ ) foreach( @groups );
+
+	return;
+}
+
+sub _add_user
+{
+	return __add_type( $_[0], 'User', $_[1] );
+}
+
+sub _add_group
+{
+	return __add_type( $_[0], 'Group', $_[1] );
+}
+
+sub __add_type
+{
+	my $action = shift;
+	my $type = shift;
+	my $instance = shift;
+
+	my $args = Storable::thaw( $action->Argument );
+	foreach( @{$args} ) {
+		next unless( $_->{'Type'} =~ /^$type$/io );
+		return if( $_->{'Instance'} eq $instance );
+	}
+
+	push( @{$args}, { Type => $type, Instance => $instance } );
+	$action->__Set( Field => 'Argument', Value => Storable::freeze( $args ) );
+
+	return;
+}
+
+=head2 delete
+
+=cut
+
+sub delete
+{
+	my $action = _get_action_by_name( $opts->{'name'} );
+
+	unless( $action ) {
+		print STDERR "ScripAction '". $opts->{'name'} ."' doesn't exist\n";
+		exit(-1);
+	}
+
+	require RT::Scrips;
+	my $scrips = RT::Scrips->new( $RT::SystemUser );
+	$scrips->Limit( FIELD => 'ScripAction', VALUE => $action->id );
+	if( $scrips->Count ) {
+		print STDERR "ScripAction '". $opts->{'name'} ."' is in use by Scrips\n";
+		exit(-1);
+	}
+
+	return __delete( $action );
+}
+
+sub __delete
+{
+	require DBIx::SearchBuilder::Record;
+	DBIx::SearchBuilder::Record::Delete( shift );
+}
+
+sub _get_action_by_name
+{
+	my $name = shift;
+	my $actions = RT::ScripActions->new( $RT::SystemUser );
+	$actions->Limit( FIELD => 'Name',
+			 VALUE => $name );
+	$actions->Limit( FIELD => 'ExecModule',
+			 VALUE => 'NotifyGroup',
+			 ENTRYAGGREGATOR => 'OR');
+	$actions->Limit( FIELD => 'ExecModule',
+			 VALUE => 'NotifyGroupAsComment',
+			 ENTRYAGGREGATOR => 'OR');
+
+	return $actions->First;
+}
+
+=head2 switch
+
+=cut
+
+sub switch
+{
+	my $action = _get_action_by_name( $opts->{'name'} );
+
+	unless( $action ) {
+		print STDERR "ScripAction '". $opts->{'name'} ."' doesn't exist\n";
+		exit(-1);
+	}
+
+	my %h = ('NotifyGroup' => 'NotifyGroupAsComment',
+		 'NotifyGroupAsComment' => 'NotifyGroup');
+
+	$action->__Set( Field => 'ExecModule',
+		       Value => $h{ $action->ExecModule } );
+}
+
+=head2 rename
+
+=cut
+
+sub rename
+{
+	my $action = _get_action_by_name( $opts->{'name'} );
+
+	unless( $action ) {
+		print STDERR "ScripAction '". $opts->{'name'} ."' doesn't exist\n";
+		exit(-1);
+	}
+
+	my $actions = RT::ScripActions->new( $RT::SystemUser );
+	$actions->Limit( FIELD => 'Name',
+			 VALUE => $opts->{'newname'} );
+	if( $actions->Count ) {
+		print STDERR "ScripAction '". $opts->{'newname'} ."' allready exists\n";
+		exit(-1);
+	}
+
+	$action->__Set( Field => 'Name',
+		       Value => $opts->{'newname'} );
+}
+
+
+=head1 SEE ALSO
+
+RT::Action::NotifyGroup, RT::Action::NotifyGroupAsComment
+
+=cut

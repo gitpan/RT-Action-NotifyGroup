@@ -1,0 +1,33 @@
+NAME
+    RT::Action::NotifyGroup - RT Action that sends notifications to groups
+    and/or users
+
+DESCRIPTION
+    RT action module that allow you to notify particular groups and/or
+    users. Distribution is shipped with "rt-notify-group-admin" script that
+    is command line tool for managing NotifyGroup scrip actions. For more
+    more info see its documentation.
+
+INSTALL
+            perl Makefile.PL
+            make
+            make install
+
+METHODS
+  SetRecipients
+    Sets the recipients of this message to Groups or Users.
+
+AUTHOR
+            Ruslan U. Zakirov
+            cubic@wildgate.miee.ru
+
+COPYRIGHT
+    This program is free software; you can redistribute it and/or modify it
+    under the same terms as Perl itself.
+
+    The full text of the license can be found in the LICENSE file included
+    with perl distribution.
+
+SEE ALSO
+    RT::Action::NotifyGroupAsComment, rtx-notify-group-admin
+
