@@ -1,11 +1,8 @@
 #line 1 "inc/Module/Install/RTx.pm - /usr/lib/perl5/site_perl/5.8.5/Module/Install/RTx.pm"
-# $File: //member/autrijus/Module-Install-RTx/lib/Module/Install/RTx.pm $ $Author: autrijus $
-# $Revision: #17 $ $Change: 10722 $ $DateTime: 2004/05/31 16:38:57 $ vim: expandtab shiftwidth=4
-
 package Module::Install::RTx;
 use Module::Install::Base; @ISA = qw(Module::Install::Base);
 
-$Module::Install::RTx::VERSION = '0.08';
+$Module::Install::RTx::VERSION = '0.09';
 
 use strict;
 use FindBin;
@@ -37,11 +34,11 @@ sub RTx {
     else {
         local @INC = (
             @INC,
-            $ENV{RTHOME},
+            $ENV{RTHOME} ? ($ENV{RTHOME}, "$ENV{RTHOME}/lib") : (),
             map {( "$_/rt3/lib", "$_/lib/rt3", "$_/lib" )} grep $_, @prefixes
         );
         until ( eval { require RT; $RT::LocalPath } ) {
-            warn "Cannot find the location of RT.pm that defines \$RT::LocalPath. ($@)\n";
+            warn "Cannot find the location of RT.pm that defines \$RT::LocalPath in: @INC\n";
             $_ = $self->prompt("Path to your RT.pm:") or exit;
             push @INC, $_, "$_/rt3/lib", "$_/lib/rt3";
         }
@@ -155,4 +152,6 @@ sub RTxInit {
 
 __END__
 
-#line 234
+#line 220
+
+#line 241

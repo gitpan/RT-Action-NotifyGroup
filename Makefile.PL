@@ -8,10 +8,11 @@ license                 ('perl');
 
 requires                ('Getopt::Long');
 requires                ('Storable');
+recommends		('Pod::PlainText');
 
 my ($lp) = $INC{'RT.pm'} =~ /^(.*)[\\\/]/;
 my $lib_path = join( ' ', "$RT::LocalPath/lib", $lp );
-print `./configure --with-rt-lib='$lib_path'`;
+Configure( { RT_LIB_PATH => $lib_path }, 'sbin/rt-notify-group-admin');
 
 skip( qr/\.in$/ );
 

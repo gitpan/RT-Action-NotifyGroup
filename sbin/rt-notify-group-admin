@@ -6,32 +6,15 @@ rt-notify-group-admin - Command line tool for administrating NotifyGroup actions
 
 =head1 SYNOPSIS
 
-	# get list of actions that allready exist
 	rt-notify-group-admin --list
-
-	# create notify group Foo action
 	rt-notify-group-admin --create 'Notify foo team' --group Foo
-
-	# create action that notify with comment
 	rt-notify-group-admin --create 'Notify foo team as comment' --comment --group Foo
-
-	# create action that notify users from groups Foo and Bar
 	rt-notify-group-admin --create 'Notify group Foo and Bar' --group Foo --group Bar
-
-	# create scrip action and user to it
 	rt-notify-group-admin --create 'Notify user foo@bar.com' --user foo@bar.com
-
-	# Add user or group to existant scrip action
 	rt-notify-group-admin --create 'Notify VIPs' --user vip1@bar.com
 	rt-notify-group-admin --add 'Notify VIPs' --user vip2@bar.com --group vip1 --user vip3@foo.com
-
-	# rename action
 	rt-notify-group-admin --rename 'Notify VIPs' --newname 'Inform VIPs'
-
-	# switch from correspond to comment and back
 	rt-notify-group-admin --switch 'Notify VIPs'
- 
-	# delete scrip action
 	rt-notify-group-admin --delete 'Notify user foo@bar.com'
 
 =head1 DESCRIPTION
@@ -40,17 +23,21 @@ rt-notify-group-admin
 
 =cut
 
+use warnings;
 use strict;
-use lib qw(@RT_LIB_PATH@);
+### replace: use lib qw(@RT_LIB_PATH@);
+use lib qw(/opt/rt3/local/lib /opt/rt3/lib);
 
 use RT;
 RT::LoadConfig;
 RT::Init;
 
+require RT::Principal;
+require RT::User;
+require RT::Group;
 require RT::ScripActions;
 
 require Storable;
-
 use Getopt::Long qw(GetOptions);
 
 our $cmd = 'usage';
@@ -108,7 +95,13 @@ sub parse_args
 
 sub usage
 {
-	print "usage $0: xxxx\n";
+	eval "require Pod::PlainText;";
+	if( $@ ) {
+		print "see `perldoc $0`\n";
+	} else {
+		my $parser = Pod::PlainText->new (sentence => 0, width => 78);
+		$parser->parse_from_file( $0 );
+	}
 }
 
 parse_args();
@@ -122,22 +115,21 @@ parse_args();
 
 exit(0);
 
-
 =head1 USAGE
 
+rt-notify-group-admin --COMMAND ARGS
+
+=head1 COMMANDS
+
 =head2 list
+
+Lists actions and its descriptions.
 
 =cut
 
 sub list
 {
-	my $actions = RT::ScripActions->new( $RT::SystemUser );
-	$actions->Limit( FIELD => 'ExecModule',
-			 VALUE => 'NotifyGroup',
-			 ENTRYAGGREGATOR => 'OR');
-	$actions->Limit( FIELD => 'ExecModule',
-			 VALUE => 'NotifyGroupAsComment',
-			 ENTRYAGGREGATOR => 'OR');
+	my $actions = _get_our_actions();
 	while( my $a = $actions->Next ) {
 		_list( $a );
 	}
@@ -152,21 +144,35 @@ sub _list
 	print "Name: ". $action->Name() ."\n";
 	print "Module: ". $action->ExecModule() ."\n";
 
-	my @args = eval { @{ Storable::thaw( $action->Argument ) } };
-	if( $@ ) {
-		$RT::Logger->error( "Storable couldn't thaw argument: $@" );
-		return;
+	my $arg = $action->Argument;
+
+	# old variant via Storable
+	my $old = eval { Storable::thaw( $arg ) };
+	unless( $@ ) {
+		$arg = __convert_old($old);
 	}
 
+	my @princ = _split_arg( $arg );
+
 	print "Members: \n";
-	foreach( @args ) {
-		print "\t". $_->{'Type'} ."\t=> ". $_->{'Instance'} ."\n";
+	foreach( @princ ) {
+		my $obj = RT::Principal->new( $RT::SystemUser );
+		$obj->Load( $_ );
+		next unless( $obj->id );
+
+		print "\t". $obj->PrincipalType;
+		print "\t=> ". $obj->Object->Name;
+		print "(Disabled!!!)" if $obj->Disabled;
+		print "\n";
 	}
 	print "\n";
 	return;
 }
 
-=head2 create
+=head2 create NAME [--comment] [--group GNAME] [--user UNAME]
+
+Creates new action with NAME and adds users and/or groups to its
+recipient list. Would be notify as comment if --comment specified.
 
 =cut
 
@@ -181,7 +187,7 @@ sub create
 		exit(-1);
 	}
 	my @groups = _check_groups( @{ $opts->{'groups'} } );
-	my @users = _check_users( @{ $opts->{'users'} } );
+	my @users  = _check_users( @{ $opts->{'users'} } );
 	
 	unless( @users + @groups ) {
 		print STDERR "List of groups and users is empty\n";
@@ -190,8 +196,8 @@ sub create
 
 	my $action = __create_empty( $opts->{'name'}, $opts->{'comment'} );
 
-	_add_user( $action, $_ ) foreach( @users );
-	_add_group( $action, $_ ) foreach( @groups );
+	__add( $action, $_ ) foreach( @users );
+	__add( $action, $_ ) foreach( @groups );
 
 	return;
 }
@@ -206,7 +212,7 @@ sub __create_empty
 			Name => $name,
 			Description => "Created with rt-notify-group-admin script",
 			ExecModule => $as_comment? 'NotifyGroupAsComment': 'NotifyGroup',
-			Argument => Storable::freeze( [] ),
+			Argument => '',
 			);
 
 	return $action;
@@ -214,9 +220,8 @@ sub __create_empty
 
 sub _check_groups
 {
-	return grep{ __check_group($_) ? 1 :
-			do { print STDERR "Group '$_' skipped, doesn't exist\n"; 0; }
-		} @_;
+	return grep { $_ ? 1: do { print STDERR "Group '$_' skipped, doesn't exist\n"; 0; } }
+		map { __check_group($_) } @_;
 }
 
 sub __check_group
@@ -225,14 +230,13 @@ sub __check_group
 	require RT::Group;
 	my $obj = RT::Group->new( $RT::SystemUser );
 	$obj->LoadUserDefinedGroup( $instance );
-	return $obj->id ? 1 : 0;
+	return $obj->id ? $obj : undef;
 }
 
 sub _check_users
 {
-	return grep{ __check_user($_) ? 1 :
-			do { print STDERR "Group '$_' skipped, doesn't exist\n"; 0; }
-		} @_;
+	return grep { $_ ? 1: do { print STDERR "User '$_' skipped, doesn't exist\n"; 0; } }
+		map { __check_user($_) } @_;
 }
 
 sub __check_user
@@ -241,12 +245,12 @@ sub __check_user
 	require RT::User;
 	my $obj = RT::User->new( $RT::SystemUser );
 	$obj->Load( $instance );
-	return $obj->id ? 1 : 0;
+	return $obj->id ? $obj : undef;
 }
 
-=head2 add
+=head2 add NAME [--group GNAME] [--user UNAME]
 
-
+Adds groups and/or users to recipients of the action NAME.
 
 =cut
 
@@ -267,41 +271,40 @@ sub add
 		exit(-1);
 	}
 
-	_add_user( $action, $_ ) foreach( @users );
-	_add_group( $action, $_ ) foreach( @groups );
+	__add( $action, $_ ) foreach( @users );
+	__add( $action, $_ ) foreach( @groups );
 
 	return;
 }
 
-sub _add_user
-{
-	return __add_type( $_[0], 'User', $_[1] );
-}
-
-sub _add_group
-{
-	return __add_type( $_[0], 'Group', $_[1] );
-}
-
-sub __add_type
+sub __add
 {
 	my $action = shift;
-	my $type = shift;
-	my $instance = shift;
+	my $obj = shift;
 
-	my $args = Storable::thaw( $action->Argument );
-	foreach( @{$args} ) {
-		next unless( $_->{'Type'} =~ /^$type$/io );
-		return if( $_->{'Instance'} eq $instance );
+	my $arg = $action->Argument;
+
+# Support old variant with storable
+	my $old = eval { Storable::thaw( $arg ) };
+	unless( $@ ) {
+		$arg = __convert_old($old);
 	}
 
-	push( @{$args}, { Type => $type, Instance => $instance } );
-	$action->__Set( Field => 'Argument', Value => Storable::freeze( $args ) );
+	my @cur = _split_arg( $arg );
+	my $id = $obj->id;
+	foreach( @cur ) {
+		return if( $_ == $id );
+	}
+
+	push( @cur, $id );
+	$action->__Set( Field => 'Argument', Value => join(';', @cur) );
 
 	return;
 }
 
-=head2 delete
+=head2 delete NAME
+
+Deletes action NAME if scrips doesn't use it.
 
 =cut
 
@@ -318,7 +321,15 @@ sub delete
 	my $scrips = RT::Scrips->new( $RT::SystemUser );
 	$scrips->Limit( FIELD => 'ScripAction', VALUE => $action->id );
 	if( $scrips->Count ) {
-		print STDERR "ScripAction '". $opts->{'name'} ."' is in use by Scrips\n";
+		my @sid;
+		while( my $s = $scrips->Next ) {
+			push @sid, $s->id;
+		}
+		print STDERR "ScripAction '"
+			. $opts->{'name'}
+			. "' is in use by Scrip(s) #"
+			. join( ";", @sid )
+			. "\n";
 		exit(-1);
 	}
 
@@ -334,20 +345,20 @@ sub __delete
 sub _get_action_by_name
 {
 	my $name = shift;
-	my $actions = RT::ScripActions->new( $RT::SystemUser );
+	my $actions = _get_our_actions();
 	$actions->Limit( FIELD => 'Name',
 			 VALUE => $name );
-	$actions->Limit( FIELD => 'ExecModule',
-			 VALUE => 'NotifyGroup',
-			 ENTRYAGGREGATOR => 'OR');
-	$actions->Limit( FIELD => 'ExecModule',
-			 VALUE => 'NotifyGroupAsComment',
-			 ENTRYAGGREGATOR => 'OR');
+
+	if( $actions->Count > 1 ) {
+		print STDERR "More then one ScripAction with name '$name'\n";
+	}
 
 	return $actions->First;
 }
 
-=head2 switch
+=head2 switch NAME
+
+Switch action NAME from notify as correspondence to comment and back.
 
 =cut
 
@@ -367,7 +378,9 @@ sub switch
 		       Value => $h{ $action->ExecModule } );
 }
 
-=head2 rename
+=head2 rename NAME --newname NEWNAME
+
+Renames action NAME to NEWNAME.
 
 =cut
 
@@ -392,6 +405,71 @@ sub rename
 		       Value => $opts->{'newname'} );
 }
 
+=head2 NOTES
+
+If command has option --group or --user then you can use it more then once,
+if other is not specified.
+
+=cut
+
+###############
+#### Utils ####
+###############
+
+sub _split_arg
+{
+	return split /[^0-9]+/, $_[0];
+}
+
+sub __convert_old
+{
+	my $arg = shift;
+	my @res;
+	foreach my $r ( @{ $arg } ) {
+		my $obj;
+		next unless $r->{'Type'};
+		if( lc $r->{'Type'} eq 'user' ) {
+			$obj = RT::User->new( $RT::SystemUser );
+		} elsif ( lc $r->{'Type'} eq 'user' ) {
+			$obj = RT::Group->new( $RT::SystemUser );
+		} else {
+			next;
+		}
+		$obj->Load( $r->{'Instance'} );
+		my $id = $obj->id;
+		next unless( $id );
+
+		push @res, $id;
+	}
+
+	return join ';', @res;
+}
+
+sub _get_our_actions
+{
+	my $actions = RT::ScripActions->new( $RT::SystemUser );
+	$actions->Limit( FIELD => 'ExecModule',
+			 VALUE => 'NotifyGroup',
+			 ENTRYAGGREGATOR => 'OR');
+	$actions->Limit( FIELD => 'ExecModule',
+			 VALUE => 'NotifyGroupAsComment',
+			 ENTRYAGGREGATOR => 'OR');
+
+	return $actions;
+}
+
+=head1 AUTHOR
+
+	Ruslan U. Zakirov
+	cubic@wildgate.miee.ru
+
+=head1 COPYRIGHT
+
+This program is free software; you can redistribute
+it and/or modify it under the same terms as Perl itself.
+
+The full text of the license can be found in the
+LICENSE file included with perl distribution.
 
 =head1 SEE ALSO
 

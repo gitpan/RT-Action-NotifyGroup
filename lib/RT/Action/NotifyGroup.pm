@@ -1,7 +1,7 @@
 package RT::Action::NotifyGroup;
 use strict;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 =head1 NAME
 
@@ -24,12 +24,14 @@ more info see its documentation.
 =cut
 
 use base qw(RT::Action::Notify);
+require RT::User;
+require RT::Group;
 
 =head1 METHODS
 
 =head2 SetRecipients
 
-Sets the recipients of this message to Groups or Users.
+Sets the recipients of this message to Groups and/or Users.
 
 =cut
 
@@ -37,27 +39,21 @@ sub SetRecipients
 {
 	my $self = shift;
 
-	require Storable;
-	my @args = eval { @{ Storable::thaw( $self->Argument ) } };
-	if( $@ ) {
-		$RT::Logger->error( "Storable couldn't thaw argument: $@" );
+	my $arg = $self->Argument;
+
+	my $old_arg = eval { Storable::thaw( $arg ) };
+	unless( $@ ) {
+		$arg = $self->__ConvertOldArg( $old_arg );
 		return;
 	}
 
-	my (@To, %seen);
-	foreach my $r ( @args ) {
-		if( $r->{Type} =~ /^User$/io ) {
-			$self->_HandleUserArgument( $r->{'Instance'} );
-		} elsif( $r->{Type} =~ /^Group$/io ) {
-			$self->_HandleGroupArgument( $r->{'Instance'} );
-		} else {
-			$RT::Logger->error( "Unknown type '". ($r->{Type}||'') ."'" );
-		}
+	foreach( $self->__SplitArg( $arg ) ) {
+		$self->_HandleArgument( $_ );
 	}
 
 	my $creator = $self->TransactionObj->CreatorObj->EmailAddress();
 	unless( $RT::NotifyActor ) {
-		@{ $self->{'To'} } = grep ( !/^$creator$/, @{ $self->{'To'} } );
+		@{ $self->{'To'} } = grep ( !/^\Q$creator\E$/, @{ $self->{'To'} } );
 	}
 
 	$self->{'seen_ueas'} = {};
@@ -65,26 +61,31 @@ sub SetRecipients
 	return 1;
 }
 
-sub __PushUserAddress
-{
-	my $self = shift;
-	my $uea = shift;
-	push( @{ $self->{'To'} }, $uea ) unless( $self->{'seen_ueas'}{ $uea }++ );
-	return;
-}
-
-sub _HandleUserArgument
+sub _HandleArgument
 {
 	my $self = shift;
 	my $instance = shift;
 	
-	my $user = RT::User->new( $RT::SystemUser );
-	$user->Load( $instance );
-	unless( $user->id ) {
-		$RT::Logger->error( "Couldn't load user '$instance'" );
+	my $obj = RT::Principal->new( $RT::SystemUser );
+	$obj->Load( $instance );
+	unless( $obj->id ) {
+		$RT::Logger->error( "Couldn't load principal #$instance" );
 		return;
 	}
-	$self->__HandleUserArgument( $user );
+	if( $obj->Disabled ) {
+		$RT::Logger->info( "Principal #$instance is disabled => skip" );
+		return;
+	}
+	if( !$obj->PrincipalType ) {
+		$RT::Logger->crit( "Principal #$instance has empty type" );
+	} elsif( lc $obj->PrincipalType eq 'user' ) {
+		$self->__HandleUserArgument( $obj->Object );
+	} elsif( lc $obj->PrincipalType eq 'group' ) {
+		$self->__HandleGroupArgument( $obj->Object );
+	} else {
+		$RT::Logger->info( "Principal #$instance has unsupported type" );
+	}
+	return;
 }
 
 sub __HandleUserArgument
@@ -100,23 +101,55 @@ sub __HandleUserArgument
 	$self->__PushUserAddress( $uea );
 }
 
-sub _HandleGroupArgument
+sub __HandleGroupArgument
 {
 	my $self = shift;
-	my $instance = shift;
-	
-	my $group = RT::Group->new( $RT::SystemUser );
-	$group->LoadUserDefinedGroup( $instance );
-	unless( $group->id ) {
-		$RT::Logger->error( "Couldn't load group '$instance'" );
-		next;
-	}
+	my $obj = shift;
 
-	my $members = $group->UserMembersObj;
+	my $members = $obj->UserMembersObj;
 	while( my $m = $members->Next ) {
 		$self->__HandleUserArgument( $m );
 	}
 }
+
+sub __SplitArg
+{
+	return split /[^0-9]+/, $_[1];
+}
+
+sub __ConvertOldArg
+{
+	my $self = shift;
+	my $arg = shift;
+	my @res;
+	foreach my $r ( @{ $arg } ) {
+		my $obj;
+		next unless $r->{'Type'};
+		if( lc $r->{'Type'} eq 'user' ) {
+			$obj = RT::User->new( $RT::SystemUser );
+		} elsif ( lc $r->{'Type'} eq 'user' ) {
+			$obj = RT::Group->new( $RT::SystemUser );
+		} else {
+			next;
+		}
+		$obj->Load( $r->{'Instance'} );
+		my $id = $obj->id;
+		next unless( $id );
+
+		push @res, $id;
+	}
+
+	return join ';', @res;
+}
+
+sub __PushUserAddress
+{
+	my $self = shift;
+	my $uea = shift;
+	push( @{ $self->{'To'} }, $uea ) unless( $self->{'seen_ueas'}{ $uea }++ );
+	return;
+}
+
 
 =head1 AUTHOR
 

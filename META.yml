@@ -1,5 +1,5 @@
 name: RT-Action-NotifyGroup
-version: undef
+version: 0.02
 abstract: RT Action-NotifyGroup Extension
 author: Ruslan U. Zakirov <cubic@wildgate.miee.ru>
 license: perl
@@ -11,4 +11,4 @@ no_index:
   directory:
     - sbin
     - inc
-generated_by: Module::Install version 0.35
+generated_by: Module::Install version 0.36
